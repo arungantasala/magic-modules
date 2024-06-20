@@ -21,6 +21,7 @@ import (
 	"github.com/GoogleCloudPlatform/magic-modules/mmv1/api/product"
 	"github.com/GoogleCloudPlatform/magic-modules/mmv1/api/resource"
 	"github.com/GoogleCloudPlatform/magic-modules/mmv1/google"
+	"golang.org/x/exp/slices"
 )
 
 // Represents a property type
@@ -210,16 +211,16 @@ type Type struct {
 	// because in Terraform the key has to be a property of the object.
 	//
 	// The name of the key. Used in the Terraform schema as a field name.
-	KeyName string `yaml:"key_name`
+	KeyName string `yaml:"key_name"`
 
 	// A description of the key's format. Used in Terraform to describe
 	// the field in documentation.
-	KeyDescription string `yaml:"key_description`
+	KeyDescription string `yaml:"key_description"`
 
 	// ====================
 	// KeyValuePairs Fields
 	// ====================
-	IgnoreWrite bool `yaml:"ignore_write`
+	IgnoreWrite bool `yaml:"ignore_write"`
 
 	// ====================
 	// Schema Modifications
@@ -411,11 +412,15 @@ func (t Type) TerraformLineage() string {
 	return fmt.Sprintf("%s.0.%s", t.ParentMetadata.TerraformLineage(), google.Underscore(t.Name))
 }
 
-func (t Type) EnumValuesToString(quoteSeperator string) string {
+func (t Type) EnumValuesToString(quoteSeperator string, addEmpty bool) string {
 	var values []string
 
 	for _, val := range t.EnumValues {
 		values = append(values, fmt.Sprintf("%s%s%s", quoteSeperator, val, quoteSeperator))
+	}
+
+	if addEmpty && !slices.Contains(values, "\"\"") && !t.Required {
+		values = append(values, "\"\"")
 	}
 
 	return strings.Join(values, ", ")
@@ -557,7 +562,7 @@ func (t Type) AtLeastOneOfList() []string {
 // Returns list of properties that needs exactly one of their fields set.
 // func (t *Type) exactly_one_of_list() {
 func (t Type) ExactlyOneOfList() []string {
-	if t.ResourceMetadata == nil {
+	if t.ResourceMetadata == nil || t.Parent() != nil {
 		return []string{}
 	}
 
@@ -576,7 +581,7 @@ func (t Type) ExactlyOneOfList() []string {
 // Returns list of properties that needs required with their fields set.
 // func (t *Type) required_with_list() {
 func (t Type) RequiredWithList() []string {
-	if t.ResourceMetadata == nil {
+	if t.ResourceMetadata == nil || t.Parent() != nil {
 		return []string{}
 	}
 
@@ -685,6 +690,10 @@ func (t Type) Removed() bool {
 // def deprecated?
 func (t Type) Deprecated() bool {
 	return t.DeprecationMessage != ""
+}
+
+func (t *Type) GetDescription() string {
+	return strings.TrimRight(t.Description, "\n")
 }
 
 // // private
@@ -1261,14 +1270,14 @@ func (t Type) PropertyNsPrefix() []string {
 // information from the "object" variable
 
 func (t Type) NamespaceProperty() string {
-	name := google.Camelize(t.Name, "lower")
+	name := google.Camelize(t.Name, "upper")
 	p := t
 	for p.Parent() != nil {
 		p = *p.Parent()
-		name = fmt.Sprintf("%s%s", google.Camelize(p.Name, "lower"), name)
+		name = fmt.Sprintf("%s%s", google.Camelize(p.Name, "upper"), name)
 	}
 
-	return fmt.Sprintf("%s%s%s", google.Camelize(t.ApiName, "lower"), t.ResourceMetadata.Name, name)
+	return fmt.Sprintf("%s%s%s", google.Camelize(t.ResourceMetadata.ProductMetadata.ApiName, "lower"), t.ResourceMetadata.Name, name)
 }
 
 // def namespace_property_from_object(property, object)
@@ -1283,22 +1292,8 @@ func (t Type) NamespaceProperty() string {
 //
 // end
 
-// new utility function for recursive calls to GetPropertyUpdateMasksGroups
-
-func (t Type) GetNestedPropertyUpdateMasksGroups(maskGroups map[string][]string, maskPrefix string) {
-	for _, prop := range t.AllProperties() {
-		if (prop.FlattenObject) {
-			prop.GetNestedPropertyUpdateMasksGroups(maskGroups, prop.ApiName)
-		}else if (len(prop.UpdateMaskFields) > 0){
-			maskGroups[google.Underscore(prop.Name)] = prop.UpdateMaskFields
-		}else{
-			maskGroups[google.Underscore(prop.Name)] = []string{maskPrefix + prop.ApiName}
-		}
-	}
-}
-
-func (t Type) CustomTemplate(templatePath string) string {
-	return resource.ExecuteTemplate(&t, templatePath)
+func (t Type) CustomTemplate(templatePath string, appendNewline bool) string {
+	return resource.ExecuteTemplate(&t, templatePath, appendNewline)
 }
 
 func (t *Type) GetIdFormat() string {
@@ -1308,11 +1303,11 @@ func (t *Type) GetIdFormat() string {
 func (t *Type) GoLiteral(value interface{}) string {
 	switch v := value.(type) {
 	case int:
-		return fmt.Sprintf("\"%d\"", v)
+		return fmt.Sprintf("%d", v)
 	case float64:
-		return fmt.Sprintf("\"%f\"", v)
+		return fmt.Sprintf("%.1f", v)
 	case bool:
-		return fmt.Sprintf("\"%v\"", v)
+		return fmt.Sprintf("%v", v)
 	case string:
 		if !strings.HasPrefix(v, "\"") {
 			return fmt.Sprintf("\"%s\"", v)
@@ -1327,4 +1322,17 @@ func (t *Type) GoLiteral(value interface{}) string {
 	default:
 		panic(fmt.Errorf("unknown go literal type %+v", value))
 	}
+}
+
+// def force_new?(property, resource)
+func (t *Type) IsForceNew() bool {
+	parent := t.Parent()
+	return (((!t.Output || t.IsA("KeyValueEffectiveLabels")) &&
+		(t.Immutable ||
+			(t.ResourceMetadata.Immutable && t.UpdateUrl == "" && !t.Immutable &&
+				(parent == nil ||
+					(parent.IsForceNew() &&
+						!(parent.FlattenObject && t.IsA("KeyValueLabels"))))))) ||
+		(t.IsA("KeyValueTerraformLabels") &&
+			t.ResourceMetadata.Updatable() && !t.ResourceMetadata.RootLabels()))
 }
